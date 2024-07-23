@@ -1,0 +1,368 @@
+# create namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: testing-space
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fusionauth-secret
+  namespace: testing-space
+type: Opaque
+data:
+  username: cG9zdGdyZXM=
+  password: bXlwYXNzd29yZA==
+  
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fusionauth-config
+  namespace: testing-space
+data:
+  FUSIONAUTH_APP_RUNTIME_MODE: development
+  FUSIONAUTH_APP_URL: http://fusionauth
+  FUSIONAUTH_SEARCH_ENGINE_TYPE: database
+  DATABASE_URL: jdbc:postgresql://fusionauth-db:5432/fusionauth?searchpath=fusionauth
+  FUSIONAUTH_APP_SILENT_MODE: "true"
+
+---
+#deployment for FusionAuth DB
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fusionauth-db-dep
+  namespace: testing-space
+  labels:
+    app: fusionauth-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      pod: fusionauth-db-pod
+  template:
+    metadata:
+      labels:
+        app: fusionauth-db
+        pod: fusionauth-db-pod
+    spec:
+      containers:
+        - name: fusionauth-db-container
+          image: postgres:10-alpine
+          imagePullPolicy: Always
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -d
+                - fusionauth
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -d
+                - fusionauth
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          startupProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -d
+                - fusionauth
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          resources:
+            requests:
+              memory: "250Mi"
+              cpu: "700m"
+            limits:
+              memory: "750Mi"
+              cpu: "1500m"
+          env:
+            - name: POSTGRES_DB
+              value: fusionauth
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: fusionauth-secret
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fusionauth-secret
+                  key: password
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: fusionauth-db-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: fusionauth-db-data
+          emptyDir: {}   
+---
+#deployment for FusionAuth
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fusionauth-dep
+  namespace: testing-space
+  labels:
+    app: fusionauth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      pod: fusionauth-pod
+  template:
+    metadata:
+      labels:
+        app: fusionauth
+        pod: fusionauth-pod
+    spec:
+      initContainers:
+        - name: wait-for-db
+          image: busybox
+          args:
+            - /bin/sh
+            - -c
+            - >
+              set -x;
+              while [[ "$(nc -zv fusionauth-db 5432 &> /dev/null; echo $?)" != 0 ]]; do
+                echo '.'
+                sleep 15;
+              done
+          resources:
+            requests:
+              memory: "250Mi"
+              cpu: "700m"
+            limits:
+              memory: "750Mi"
+              cpu: "1500m"
+
+      containers:
+        - name: fusionauth-container
+          image: fusionauth/fusionauth-app:1.51.1
+          imagePullPolicy: Always
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9011
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9011
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          startupProbe:
+            httpGet:
+              path: /
+              port: 9011
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          resources:
+            requests:
+              memory: "250Mi"
+              cpu: "700m"
+            limits:
+              memory: "750Mi"
+              cpu: "1500m"
+          env:
+            - name: FUSIONAUTH_APP_RUNTIME_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: fusionauth-config
+                  key: FUSIONAUTH_APP_RUNTIME_MODE
+            - name: FUSIONAUTH_APP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fusionauth-config
+                  key: FUSIONAUTH_APP_URL
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: fusionauth-config
+                  key: DATABASE_URL
+            - name: FUSIONAUTH_APP_SILENT_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: fusionauth-config
+                  key: FUSIONAUTH_APP_SILENT_MODE
+            - name: DATABASE_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: fusionauth-secret
+                  key: username
+            - name: DATABASE_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fusionauth-secret
+                  key: password
+            - name: DATABASE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: fusionauth-secret
+                  key: username
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fusionauth-secret
+                  key: password
+          ports:
+            - containerPort: 9011
+              name: http
+          volumeMounts:
+            - name: fusionauth-data
+              mountPath: /usr/local/fusionauth/data
+              subPath: data
+        - name: nginx-proxy
+          image: nginx:1.27.0-alpine
+          ports:
+            - containerPort: 8080
+          imagePullPolicy: Always
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          resources:
+            requests:
+              memory: "250Mi"
+              cpu: "700m"
+            limits:
+              memory: "750Mi"
+              cpu: "1500m"
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-pid
+              mountPath: /var/run
+            - name: tmp-volume
+              mountPath: /tmp
+      volumes:
+        - name: fusionauth-data
+          emptyDir: {}
+        - name: nginx-pid
+          emptyDir: {}
+        - name: tmp-volume
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-config
+          configMap:
+            name: nginx-proxy-config
+---
+# Service for FusionAuth
+apiVersion: v1
+kind: Service
+metadata:
+  name: fusionauth
+  namespace: testing-space
+  labels:
+    app: fusionauth
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+    - port: 9011
+      targetPort: 9011
+      name: http-9011
+  selector:
+    app: fusionauth
+    pod: fusionauth-pod
+---
+# Service for FusionAuth DB
+apiVersion: v1
+kind: Service
+metadata:
+  name: fusionauth-db
+  namespace: testing-space
+  labels:
+    app: fusionauth-db
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app: fusionauth-db
+    pod: fusionauth-db-pod
+---
+# Ingress for FusionAuth
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fusionauth-ingress
+  namespace: testing-space
+spec:
+  rules:
+    - host: localhost
+      http:
+        paths:
+          path: /fa
+          pathType: Prefix
+          rewrites: /
+          backend:
+            service:
+              name: fusionauth
+              port:
+                number: 9011
+---
